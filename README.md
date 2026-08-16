@@ -2,36 +2,29 @@
 
 Geometric portrait of the married couple using [fogleman/primitive](https://github.com/fogleman/primitive).
 
-## Goal
+## Result
 
-- Shape mode: **rotated ellipses only** (`-m 7`)
-- Optimize for **accuracy of the couple** over background / surroundings
+| File | Description |
+| --- | --- |
+| [`output/primitive_rotated_ellipses.png`](output/primitive_rotated_ellipses.png) | Final artwork (rotated ellipses only) |
+| [`output/primitive_rotated_ellipses.svg`](output/primitive_rotated_ellipses.svg) | Vector version of the scene pass |
+| [`output/comparison.png`](output/comparison.png) | Original vs result |
+| [`input/couple.jpg`](input/couple.jpg) | Source wedding photo |
 
-## How it works
+## Approach
 
-1. `scripts/prepare_couple_priority.py` detects faces, builds a soft couple ROI, and creates a *guided target* (couple stays sharp; the rest is blurred/flattened so residual error concentrates on the couple).
-2. `scripts/run_primitive_couple.sh` runs `primitive` with hundreds of rotated ellipses on that guided target.
+- **Shapes:** rotated ellipses only (`primitive -m 7`)
+- **Couple priority:**
+  1. Detect the couple’s faces and build a soft full-body ROI
+  2. Mildly guide the full scene so residual error favors the couple
+  3. Pass 1: full-scene primitives
+  4. Pass 2: high-detail couple crop composited back
+  5. Pass 3: face-band refinement composited with a soft elliptical mask
 
-## Usage
-
-1. Put the source photo at `input/couple.jpg` (or `.png`).
-2. Run:
+## Re-run
 
 ```bash
 ./scripts/run_primitive_couple.sh input/couple.jpg
 ```
 
-Outputs land in `output/`:
-
-| File | Description |
-| --- | --- |
-| `primitive_rotated_ellipses.png` | Final artwork |
-| `primitive_rotated_ellipses.svg` | Vector version |
-| `couple_roi_debug.png` | Detected couple ROI / importance overlay |
-| `comparison.png` | Original vs result |
-
-Optional env knobs: `N` (shape count, default 500), `R` (working size, default 512), `S` (output size, default 1600).
-
-```bash
-N=800 R=640 S=2048 ./scripts/run_primitive_couple.sh input/couple.jpg
-```
+Optional knobs: `SCENE_N`, `COUPLE_N`, `R`, `S`.
