@@ -1,30 +1,50 @@
 # juta-cyntia
 
-Geometric portrait of the married couple using [fogleman/primitive](https://github.com/fogleman/primitive).
+Geometric portrait of the married couple using a **distance-weighted** fork of
+[fogleman/primitive](https://github.com/fogleman/primitive) — **rotated ellipses only**.
 
 ## Result
 
 | File | Description |
 | --- | --- |
-| [`output/primitive_rotated_ellipses.png`](output/primitive_rotated_ellipses.png) | Final artwork (rotated ellipses only) |
-| [`output/primitive_rotated_ellipses.svg`](output/primitive_rotated_ellipses.svg) | Vector version of the scene pass |
+| [`output/primitive_rotated_ellipses.png`](output/primitive_rotated_ellipses.png) | Final artwork |
+| [`output/primitive_rotated_ellipses.svg`](output/primitive_rotated_ellipses.svg) | Vector scene pass |
 | [`output/comparison.png`](output/comparison.png) | Original vs result |
-| [`input/couple.jpg`](input/couple.jpg) | Source wedding photo |
+| [`output/importance_weights_overlay.png`](output/importance_weights_overlay.png) | Distance importance visualization |
+| [`input/couple.jpg`](input/couple.jpg) | Source photo |
 
-## Approach
+## Distance importance
 
-- **Shapes:** rotated ellipses only (`primitive -m 7`)
-- **Couple priority:**
-  1. Detect the couple’s faces and build a soft full-body ROI
-  2. Mildly guide the full scene so residual error favors the couple
-  3. Pass 1: full-scene primitives
-  4. Pass 2: high-detail couple crop composited back
-  5. Pass 3: face-band refinement composited with a soft elliptical mask
+Per-pixel weight uses smooth distance falloff from face cores and the body ROI:
 
-## Re-run
+```
+weight = 1 + 9·body_m + 90·face_m
+```
+
+So approximately:
+
+| Region | Weight vs background |
+| --- | --- |
+| Faces | **~100×** |
+| Bodies | **~10×** |
+| Background | **1×** |
+
+`body_m` / `face_m` are soft memberships from a distance transform
+(`exp(-½ (d/σ)²)`), so importance declines gradually instead of hard cuts.
+
+These weights drive:
+
+1. **Error scoring** in `tools/wprimitive` (face mistakes cost ~100× more)
+2. **Shape proposals** (centers sampled toward important pixels; radii shrink there)
+
+## Pipeline
+
+1. Build the distance weight map
+2. Unweighted scene pass (keeps background looking good)
+3. Body crop pass with the weight map (~10×)
+4. Face crop pass with the weight map (~100×, lower alpha)
+5. Soft-mask composite back onto the scene
 
 ```bash
 ./scripts/run_primitive_couple.sh input/couple.jpg
 ```
-
-Optional knobs: `SCENE_N`, `COUPLE_N`, `R`, `S`.
