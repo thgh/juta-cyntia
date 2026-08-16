@@ -39,34 +39,101 @@ def detect_faces(bgr: np.ndarray) -> list[tuple[int, int, int, int]]:
     return [(int(x), int(y), int(w), int(h)) for x, y, w, h in faces]
 
 
+def _face_center(face: tuple[int, int, int, int]) -> tuple[float, float]:
+    x, y, w, h = face
+    return x + w / 2.0, y + h / 2.0
+
+
+def pick_couple_faces(
+    faces: list[tuple[int, int, int, int]], width: int, height: int
+) -> list[tuple[int, int, int, int]]:
+    """Pick the married couple faces, preferring a central side-by-side pair."""
+    if not faces:
+        return []
+
+    cx, cy = width / 2.0, height / 2.0
+
+    def score(face: tuple[int, int, int, int]) -> float:
+        x, y, w, h = face
+        fx, fy = _face_center(face)
+        # Prefer reasonably large faces near the photo center (ignore blur/tree hits).
+        size = (w * h) / float(width * height)
+        dx = abs(fx - cx) / width
+        dy = abs(fy - cy) / height
+        return size * 4.0 - (dx * 1.6 + dy * 1.1)
+
+    ranked = sorted(faces, key=score, reverse=True)
+
+    # Search for a plausible couple: two similarly sized faces, side by side,
+    # both near the middle of the frame.
+    best_pair = None
+    best_pair_score = -1e9
+    top = ranked[: min(6, len(ranked))]
+    for i, a in enumerate(top):
+        ax, ay = _face_center(a)
+        aw, ah = a[2], a[3]
+        for b in top[i + 1 :]:
+            bx, by = _face_center(b)
+            bw, bh = b[2], b[3]
+            size_ratio = max(aw * ah, bw * bh) / max(1.0, min(aw * ah, bw * bh))
+            if size_ratio > 2.8:
+                continue
+            # Couple stands roughly shoulder-to-shoulder.
+            if abs(ay - by) > height * 0.12:
+                continue
+            horiz = abs(ax - bx) / width
+            if horiz < 0.04 or horiz > 0.45:
+                continue
+            mid_x = (ax + bx) / 2.0
+            mid_y = (ay + by) / 2.0
+            pair_score = (
+                score(a)
+                + score(b)
+                - abs(mid_x - cx) / width
+                - abs(mid_y - cy) / height * 0.5
+                - abs(size_ratio - 1.0)
+            )
+            if pair_score > best_pair_score:
+                best_pair_score = pair_score
+                best_pair = [a, b]
+
+    if best_pair:
+        return best_pair
+    return ranked[:1]
+
+
 def couple_roi_from_faces(
     faces: list[tuple[int, int, int, int]], width: int, height: int
 ) -> tuple[int, int, int, int]:
-    """Return expanded bounding box covering faces + upper bodies."""
-    if not faces:
-        # Fallback: central portrait framing (common wedding composition).
-        x0 = int(width * 0.18)
-        x1 = int(width * 0.82)
-        y0 = int(height * 0.08)
-        y1 = int(height * 0.78)
+    """Return expanded bounding box covering faces + full wedding attire."""
+    chosen = pick_couple_faces(faces, width, height)
+    if not chosen:
+        # Fallback: central full-length portrait framing.
+        x0 = int(width * 0.22)
+        x1 = int(width * 0.78)
+        y0 = int(height * 0.12)
+        y1 = int(height * 0.92)
         return x0, y0, x1, y1
-
-    # Prefer the two largest faces (married couple); ignore tiny extras.
-    faces_sorted = sorted(faces, key=lambda f: f[2] * f[3], reverse=True)
-    chosen = faces_sorted[:2]
 
     xs, ys, xe, ye = [], [], [], []
     for x, y, w, h in chosen:
-        # Expand downward for torsos / dress / suit, and laterally a bit.
-        xs.append(int(x - 0.55 * w))
-        ys.append(int(y - 0.45 * h))
-        xe.append(int(x + 1.55 * w))
-        ye.append(int(y + 3.2 * h))
+        # Expand for hair, torsos, full dress/suit length, and ground underfoot.
+        xs.append(int(x - 1.25 * w))
+        ys.append(int(y - 0.85 * h))
+        xe.append(int(x + 2.25 * w))
+        ye.append(int(y + 14.0 * h))
 
     x0 = max(0, min(xs))
     y0 = max(0, min(ys))
     x1 = min(width, max(xe))
     y1 = min(height, max(ye))
+
+    # Ensure the ROI stays centered enough to cover both people fully.
+    min_width = int(width * 0.34)
+    if x1 - x0 < min_width:
+        mid = (x0 + x1) // 2
+        x0 = max(0, mid - min_width // 2)
+        x1 = min(width, x0 + min_width)
     return x0, y0, x1, y1
 
 
@@ -77,31 +144,38 @@ def soft_mask(width: int, height: int, roi: tuple[int, int, int, int], feather: 
     # Feather proportional to image size so edges don't hard-cut shapes.
     k = max(3, int(min(width, height) * feather) | 1)
     mask = cv2.GaussianBlur(mask, (k, k), 0)
-    # Remap: background stays slightly important so the scene doesn't vanish.
-    return 0.12 + 0.88 * mask
+    # Keep surroundings somewhat important (tree + teal motion blur), but
+    # still bias residual error toward the couple.
+    return 0.35 + 0.65 * mask
 
 
 def make_guided_target(bgr: np.ndarray, mask: np.ndarray) -> np.ndarray:
     h, w = bgr.shape[:2]
-    # Strong blur for non-couple areas — cheap for primitive to approximate.
-    k = max(21, (min(h, w) // 8) | 1)
+    # Mild blur outside the couple — preserves color/structure of bridesmaids + tree.
+    k = max(15, (min(h, w) // 14) | 1)
     blurred = cv2.GaussianBlur(bgr, (k, k), 0)
-    mean = bgr.mean(axis=(0, 1), keepdims=True).astype(np.float32)
-    flat = (0.65 * blurred.astype(np.float32) + 0.35 * mean).astype(np.uint8)
 
     m = mask[..., None]
-    guided = (bgr.astype(np.float32) * m + flat.astype(np.float32) * (1.0 - m)).astype(
+    guided = (bgr.astype(np.float32) * m + blurred.astype(np.float32) * (1.0 - m)).astype(
         np.uint8
     )
     return guided
 
 
-def overlay_debug(bgr: np.ndarray, faces, roi, mask: np.ndarray) -> np.ndarray:
+def overlay_debug(
+    bgr: np.ndarray,
+    faces,
+    chosen,
+    roi,
+    mask: np.ndarray,
+) -> np.ndarray:
     out = bgr.copy()
     x0, y0, x1, y1 = roi
     cv2.rectangle(out, (x0, y0), (x1, y1), (0, 220, 80), 3)
     for x, y, w, h in faces:
-        cv2.rectangle(out, (x, y), (x + w, y + h), (40, 120, 255), 2)
+        cv2.rectangle(out, (x, y), (x + w, y + h), (40, 120, 255), 1)
+    for x, y, w, h in chosen:
+        cv2.rectangle(out, (x, y), (x + w, y + h), (0, 255, 255), 3)
     heat = (mask * 255).astype(np.uint8)
     heat_color = cv2.applyColorMap(heat, cv2.COLORMAP_MAGMA)
     return cv2.addWeighted(out, 0.72, heat_color, 0.28, 0)
@@ -134,10 +208,11 @@ def main() -> None:
 
     h, w = bgr.shape[:2]
     faces = detect_faces(bgr)
+    chosen = pick_couple_faces(faces, w, h)
     roi = couple_roi_from_faces(faces, w, h)
     mask = soft_mask(w, h, roi, args.feather)
     guided = make_guided_target(bgr, mask)
-    debug = overlay_debug(bgr, faces, roi, mask)
+    debug = overlay_debug(bgr, faces, chosen, roi, mask)
 
     guided_path = outdir / "guided_target.png"
     mask_path = outdir / "importance_mask.png"
@@ -151,6 +226,7 @@ def main() -> None:
     Image.open(src).convert("RGB").save(original_path)
 
     print(f"faces_detected={len(faces)}")
+    print(f"couple_faces={chosen}")
     print(f"roi={roi}")
     print(f"wrote {guided_path}")
     print(f"wrote {mask_path}")

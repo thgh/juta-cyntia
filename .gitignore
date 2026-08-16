@@ -1,7 +1,11 @@
-input/*
-!input/.gitkeep
-output/*
-!output/.gitkeep
+output/frames/
+output/couple_pass/
+output/guided_target.png
+output/importance_mask.png
+output/original.png
+output/pass1_scene.png
+output/primitive_scene_only.png
+output/couple_roi.json
 __pycache__/
 *.pyc
 .DS_Store
