@@ -14,7 +14,6 @@ func SampleWeightedPosition(rnd *rand.Rand, w, h int, power float64) (x, y, loca
 		return xf, yf, 1
 	}
 
-	// Rejection sampling with accept prob (weight/WeightMax)^power.
 	if power < 1 {
 		power = 1
 	}
@@ -51,20 +50,22 @@ func SampleWeightedPosition(rnd *rand.Rand, w, h int, power float64) (x, y, loca
 	return float64(xi) + 0.5, float64(yi) + 0.5, pixelWeight(xi, yi, w)
 }
 
-// MaxRadiusForWeight returns a max ellipse radius that shrinks in important areas.
-func MaxRadiusForWeight(localWeight float64, imageMinDim int) float64 {
-	base := float64(imageMinDim) * 0.08
-	if base < 18 {
-		base = 18
+// SampleEllipseRadii returns rx, ry in roughly the original algorithm's range
+// (about 1..32+), with only a soft skew toward smaller shapes in high-weight
+// areas. Large shapes remain possible everywhere so the canvas stays covered.
+func SampleEllipseRadii(rnd *rand.Rand, localWeight float64, imageMinDim int) (rx, ry float64) {
+	base := 32.0
+	if imageMinDim < 96 {
+		base = float64(imageMinDim) / 3
 	}
-	if base > 40 {
-		base = 40
+	// Power > 1 skews rand toward 0 (smaller). Faces get a stronger skew,
+	// background stays close to uniform like stock primitive.
+	power := 1.0
+	if WeightMax > 1 && localWeight > 1 {
+		t := math.Log(localWeight) / math.Log(WeightMax) // 0..1
+		power = 1.0 + 1.6*t                             // bg~1, body~1.7, face~2.6
 	}
-	if WeightMax <= 1 || localWeight <= 1 {
-		return base
-	}
-	// faces (~100): ~2-4px, bodies (~10): ~8-12px, bg (~1): base
-	t := math.Log(localWeight) / math.Log(WeightMax) // 0..1
-	minR := 2.0
-	return minR + (base-minR)*math.Pow(1.0-t, 2.2)
+	rx = math.Pow(rnd.Float64(), power)*base + 1
+	ry = math.Pow(rnd.Float64(), power)*base + 1
+	return rx, ry
 }

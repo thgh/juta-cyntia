@@ -106,13 +106,23 @@ type RotatedEllipse struct {
 	Angle  float64
 }
 
+// ProposalBias controls how often new shapes sample positions by weight.
+// 0 = always uniform (stock primitive), 1 = always weight-biased.
+var ProposalBias = 0.55
+
 func NewRandomRotatedEllipse(worker *Worker) *RotatedEllipse {
 	rnd := worker.Rnd
-	// Bias proposals toward important pixels (faces >> bodies >> background).
-	x, y, wt := SampleWeightedPosition(rnd, worker.W, worker.H, 1.85)
-	maxR := MaxRadiusForWeight(wt, minInt(worker.W, worker.H))
-	rx := rnd.Float64()*maxR + 1
-	ry := rnd.Float64()*maxR + 1
+	var x, y, wt float64
+	// Mix uniform coverage (like stock primitive) with weight-biased proposals.
+	// Scoring still uses the full weight map either way.
+	if PixelWeights != nil && rnd.Float64() < ProposalBias {
+		x, y, wt = SampleWeightedPosition(rnd, worker.W, worker.H, 1.25)
+	} else {
+		x = rnd.Float64() * float64(worker.W)
+		y = rnd.Float64() * float64(worker.H)
+		wt = pixelWeight(int(x), int(y), worker.W)
+	}
+	rx, ry := SampleEllipseRadii(rnd, wt, minInt(worker.W, worker.H))
 	a := rnd.Float64() * 360
 	return &RotatedEllipse{worker, x, y, rx, ry, a}
 }
@@ -140,18 +150,15 @@ func (c *RotatedEllipse) Mutate() {
 	w := c.Worker.W
 	h := c.Worker.H
 	rnd := c.Worker.Rnd
-	wt := pixelWeight(int(c.X), int(c.Y), w)
-	maxR := MaxRadiusForWeight(wt, minInt(w, h))
-	// Smaller mutations in high-importance regions to refine faces.
-	posSigma := 16.0 / math.Sqrt(math.Max(wt, 1))
-	radSigma := 16.0 / math.Sqrt(math.Max(wt, 1))
+	// Keep mutations close to the original algorithm so sizes stay varied.
+	// Importance is enforced by weighted scoring, not hard size clamps.
 	switch rnd.Intn(3) {
 	case 0:
-		c.X = clamp(c.X+rnd.NormFloat64()*posSigma, 0, float64(w-1))
-		c.Y = clamp(c.Y+rnd.NormFloat64()*posSigma, 0, float64(h-1))
+		c.X = clamp(c.X+rnd.NormFloat64()*16, 0, float64(w-1))
+		c.Y = clamp(c.Y+rnd.NormFloat64()*16, 0, float64(h-1))
 	case 1:
-		c.Rx = clamp(c.Rx+rnd.NormFloat64()*radSigma, 1, maxR)
-		c.Ry = clamp(c.Ry+rnd.NormFloat64()*radSigma, 1, maxR)
+		c.Rx = clamp(c.Rx+rnd.NormFloat64()*16, 1, float64(w-1))
+		c.Ry = clamp(c.Ry+rnd.NormFloat64()*16, 1, float64(h-1))
 	case 2:
 		c.Angle = c.Angle + rnd.NormFloat64()*32
 	}

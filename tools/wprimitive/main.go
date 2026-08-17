@@ -30,6 +30,7 @@ var (
 	Nth        int
 	Repeat     int
 	WeightMap  string
+	Warmup     int
 	V, VV      bool
 )
 
@@ -76,6 +77,7 @@ func init() {
 	flag.IntVar(&Nth, "nth", 1, "save every Nth frame (put \"%d\" in path)")
 	flag.IntVar(&Repeat, "rep", 0, "add N extra shapes per iteration with reduced search")
 	flag.StringVar(&WeightMap, "w", "", "grayscale importance map (0=bg weight 1, 255=face weight 100)")
+	flag.IntVar(&Warmup, "warmup", 0, "run N shapes with uniform weights before enabling -w (coverage first)")
 	flag.BoolVar(&V, "v", false, "verbose")
 	flag.BoolVar(&VV, "vv", false, "very verbose")
 }
@@ -147,20 +149,30 @@ func main() {
 		input = resize.Thumbnail(size, size, input, resize.Bilinear)
 	}
 
-	// optional per-pixel importance weights (resized to match working input)
+	// optional per-pixel importance weights (resized to match working input).
+	// If -warmup > 0, start uniform so coverage fills the canvas first, then
+	// enable the weight map (extends stock primitive rather than replacing it).
+	var pendingWeights []float64
+	b := input.Bounds().Size()
 	if WeightMap != "" {
 		primitive.Log(1, "reading weight map %s\n", WeightMap)
 		wm, err := primitive.LoadImage(WeightMap)
 		check(err)
-		b := input.Bounds().Size()
 		wm = resize.Resize(uint(b.X), uint(b.Y), wm, resize.Bilinear)
-		weights := weightMapFromImage(wm)
-		primitive.SetPixelWeights(b.X, b.Y, weights)
+		pendingWeights = weightMapFromImage(wm)
 		primitive.Log(1, "weights: min=%.2f max=%.2f mean=%.2f\n",
-			minFloat(weights), maxFloat(weights), meanFloat(weights))
-	} else {
-		b := input.Bounds().Size()
+			minFloat(pendingWeights), maxFloat(pendingWeights), meanFloat(pendingWeights))
+	}
+	if Warmup > 0 && pendingWeights != nil {
 		primitive.SetPixelWeights(b.X, b.Y, nil)
+		primitive.ProposalBias = 0 // pure stock coverage during warmup
+		primitive.Log(1, "warmup: first %d shapes use uniform weights for coverage\n", Warmup)
+	} else if pendingWeights != nil {
+		primitive.SetPixelWeights(b.X, b.Y, pendingWeights)
+		primitive.ProposalBias = 0.65
+	} else {
+		primitive.SetPixelWeights(b.X, b.Y, nil)
+		primitive.ProposalBias = 0
 	}
 
 	// determine background color
@@ -176,12 +188,23 @@ func main() {
 	primitive.Log(1, "%d: t=%.3f, score=%.6f\n", 0, 0.0, model.Score)
 	start := time.Now()
 	frame := 0
+	weightsEnabled := pendingWeights == nil || Warmup <= 0
 	for j, config := range Configs {
 		primitive.Log(1, "count=%d, mode=%d, alpha=%d, repeat=%d\n",
 			config.Count, config.Mode, config.Alpha, config.Repeat)
 
 		for i := 0; i < config.Count; i++ {
 			frame++
+
+			// After warmup shapes, switch on the importance map.
+			if !weightsEnabled && pendingWeights != nil && frame > Warmup {
+				primitive.Log(1, "enabling weight map after warmup (%d shapes)\n", Warmup)
+				primitive.SetPixelWeights(b.X, b.Y, pendingWeights)
+				primitive.ProposalBias = 0.65
+				model.Rescore()
+				weightsEnabled = true
+				primitive.Log(1, "rescore with weights: %.6f\n", model.Score)
+			}
 
 			// find optimal shape and add it to the model
 			t := time.Now()
